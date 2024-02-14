@@ -11,16 +11,15 @@ extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_middle;
 
-use std::{any::Any, path, process, str::{self, FromStr}, sync::Arc};
-use rustc_middle::{query::Key, ty::{Ty, TyCtxt, TyKind}};
+use std::{path, process, str::{self, FromStr}, sync::Arc};
+use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 use rustc_ast_pretty::pprust::item_to_string;
 use rustc_errors::registry;
 use rustc_session::config;
 use rustc_errors::DIAGNOSTICS;
 use std::path::PathBuf;
-use rustc_hir::{intravisit::Visitor, Stmt};
+use rustc_hir::Stmt;
 use rustc_span::source_map::SourceMap;
-use rustc_hir::{Expr, def::Res};
 
 pub fn get_config(input_path: PathBuf) -> rustc_interface::Config {
     let out = process::Command::new("rustc")
@@ -79,20 +78,10 @@ fn extract_local_path(name: &rustc_span::FileName) -> Option<PathBuf> {
     }
 }
 
+pub fn parse_local<'tcx>(tcx: TyCtxt<'tcx>, stmt:&Stmt, item:&rustc_hir::Item, source_map: &SourceMap) -> Option<VarInfo<'tcx>> {
+    println!("{:#?}", stmt);
 
-
-struct HirVisitor<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    var_infos: Vec<VarInfo<'tcx>>,
-}
-
-
-
-impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for HirVisitor<'tcx> {
-    type Map = rustc_middle::hir::map::Map<'tcx>;
-
-    fn visit_local(&mut self, local: &'tcx rustc_hir::Local<'tcx>) {
-        let source_map = self.tcx.sess.source_map();
+    if let rustc_hir::StmtKind::Local(local) = stmt.kind {
         let ident_name = local.pat.simple_ident().unwrap().name.as_str().to_string();
 
         // println!("{:#?}", var_span);
@@ -105,8 +94,8 @@ impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for HirVisitor<'tcx> {
 
         let ty = if let Some(expr) = local.init {
             let hir_id = expr.hir_id;
-            let def_id = hir_id.owner.def_id;
-            let ty = self.tcx.typeck(def_id).node_type(hir_id);
+            let def_id = item.hir_id().owner.def_id;
+            let ty = tcx.typeck(def_id).node_type(hir_id);
             Some(ty)
         } else {
             None
@@ -122,46 +111,32 @@ impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for HirVisitor<'tcx> {
             start_file: start_path,
             end_file: end_path,
         };
-        println!("{:#?}", var_info);
-        rustc_hir::intravisit::walk_local(self, local);
+        Some(var_info)
+    } else {
+        // println!("stmt kind: {:#?}", stmt.kind);
+        None
     }
+}
 
-    fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
-        let source_map = self.tcx.sess.source_map();
 
-        if let rustc_hir::ExprKind::Path(qpath) = expr.kind {
-            if let rustc_hir::QPath::Resolved(_, p) = qpath {
-
-                for seg in p.segments.into_iter() {
-                    if let rustc_hir::def::Res::Local(hir_id) = p.res {
-                        let def_id = hir_id.owner.def_id;
-                        let ty = self.tcx.typeck(def_id).node_type(hir_id);
-                        let ident_name = seg.ident.name.as_str().to_string();
-                        let var_span = seg.ident.span.data();
-                        let start = source_map.lookup_char_pos(var_span.lo);
-                        let end = source_map.lookup_char_pos(var_span.hi);
-
-                        let start_path = extract_local_path(&start.file.name);
-                        let end_path = extract_local_path(&end.file.name);
-
-                        let var_info = VarInfo {
-                            name: ident_name,
-                            start_line: start.line,
-                            start_col: start.col_display,
-                            end_line: end.line,
-                            end_col: end.col_display,
-                            ty: Some(ty),
-                            start_file: start_path,
-                            end_file: end_path,
-                        };
-                        println!("{:#?}", var_info);
-                    }
+pub fn parse<'tcx>(tcx: TyCtxt<'tcx>) {
+    // Every compilation contains a single crate.
+    let hir_krate = tcx.hir();
+    let source_map = tcx.sess.source_map();
+    
+    for id in hir_krate.items() {
+        let item = hir_krate.item(id);
+        // processing the functions
+        if let rustc_hir::ItemKind::Fn(_, _, body_id) = item.kind {
+            let fn_body_expr = &tcx.hir().body(body_id).value;
+            // Function body is a block expr
+            if let rustc_hir::ExprKind::Block(block, _) = fn_body_expr.kind {
+                for stmt in block.stmts.into_iter() {
+                    let var_info = parse_local(tcx, stmt, item, source_map);
+                    //println!("{:#?}", var_info);
                 }
-
             }
         }
-        //println!("{:#?}", expr);
-        rustc_hir::intravisit::walk_expr(self, expr);
     }
 }
 
@@ -173,31 +148,7 @@ fn main() {
         compiler.enter(|queries| {
             // Analyze the crate and inspect the types under the cursor.
             queries.global_ctxt().unwrap().enter(|tcx| {
-                let hir_krate = tcx.hir();
-                //let source_map = tcx.sess.source_map();
-                //parse(tcx);
-
-                let mut visitor = HirVisitor {
-                    tcx,
-                    var_infos: Vec::new(),
-                };
-                
-                for id in hir_krate.items() {
-                    let item = hir_krate.item(id);
-
-                    if let rustc_hir::ItemKind::Fn(_, _, body_id) = item.kind {
-                        let fn_body_expr = &tcx.hir().body(body_id).value;
-                        // Function body is a block expr
-                        if let rustc_hir::ExprKind::Block(block, _) = fn_body_expr.kind {
-                            for stmt in block.stmts.into_iter() {
-                                //println!("{:#?}", stmt);
-                                visitor.visit_stmt(stmt);
-                            }
-                        }
-                    }
-
-                }
-                
+                parse(tcx);
             })
         });
     });
