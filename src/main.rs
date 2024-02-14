@@ -12,7 +12,7 @@ extern crate rustc_span;
 extern crate rustc_middle;
 
 use std::{any::Any, path, process, str::{self, FromStr}, sync::Arc};
-use rustc_middle::{query::Key, ty::{Ty, TyCtxt, TyKind}};
+use rustc_middle::{hir::nested_filter, query::Key, ty::{Ty, TyCtxt, TyKind}};
 use rustc_ast_pretty::pprust::item_to_string;
 use rustc_errors::registry;
 use rustc_session::config;
@@ -20,7 +20,8 @@ use rustc_errors::DIAGNOSTICS;
 use std::path::PathBuf;
 use rustc_hir::{intravisit::Visitor, Stmt};
 use rustc_span::source_map::SourceMap;
-use rustc_hir::{Expr, def::Res};
+use rustc_hir::{Expr, Item, def::Res};
+
 
 pub fn get_config(input_path: PathBuf) -> rustc_interface::Config {
     let out = process::Command::new("rustc")
@@ -83,13 +84,25 @@ fn extract_local_path(name: &rustc_span::FileName) -> Option<PathBuf> {
 
 struct HirVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
-    var_infos: Vec<VarInfo<'tcx>>,
 }
 
+struct All;
+
+impl<'hir> rustc_hir::intravisit::nested_filter::NestedFilter<'hir> for All {
+    type Map = rustc_middle::hir::map::Map<'hir>;
+    const INTER: bool = true;
+    const INTRA: bool = true;
+}
 
 
 impl<'tcx> rustc_hir::intravisit::Visitor<'tcx> for HirVisitor<'tcx> {
     type Map = rustc_middle::hir::map::Map<'tcx>;
+    type NestedFilter = All;
+
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
+    }
+
 
     fn visit_local(&mut self, local: &'tcx rustc_hir::Local<'tcx>) {
         let source_map = self.tcx.sess.source_map();
@@ -179,22 +192,13 @@ fn main() {
 
                 let mut visitor = HirVisitor {
                     tcx,
-                    var_infos: Vec::new(),
                 };
+
                 
                 for id in hir_krate.items() {
-                    let item = hir_krate.item(id);
+                    // let item = hir_krate.item(id);
+                    rustc_hir::intravisit::Visitor::visit_nested_item(&mut visitor, id);
 
-                    if let rustc_hir::ItemKind::Fn(_, _, body_id) = item.kind {
-                        let fn_body_expr = &tcx.hir().body(body_id).value;
-                        // Function body is a block expr
-                        if let rustc_hir::ExprKind::Block(block, _) = fn_body_expr.kind {
-                            for stmt in block.stmts.into_iter() {
-                                //println!("{:#?}", stmt);
-                                visitor.visit_stmt(stmt);
-                            }
-                        }
-                    }
 
                 }
                 
